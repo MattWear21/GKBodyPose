@@ -16,6 +16,7 @@ from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.cm as cm
 import math
 import cv2
+import re
 
 mpii_edges = [[0, 1], [1, 2], [2, 6], [6, 3], [3, 4], [4, 5], 
               [10, 11], [11, 12], [12, 8], [8, 13], [13, 14], [14, 15], 
@@ -63,20 +64,20 @@ def plot2D3DPose(array_id, save_df, poses_2d, poses_3d, img_path, mpii_edges):
     img_file = save_df['file'][array_id]
     image = importImage(img_path + img_file)
     pose_2d = pose_to_matrix(poses_2d[array_id])
-    pose_3d = pose_to_matrix(poses_3d[array_id])
+    pose_3d = pose_to_matrix(poses_3d[array_id][:-1])
     print('Array ID: ' + str(array_id))
     print("File Name: " + img_file)
 
-    fig = plt.figure(figsize=(8, 6))
+    fig = plt.figure(figsize=(15, 5))
     #fig.patch.set_visible(False)
-    ax = fig.add_subplot(2, 2, 1)
+    ax = fig.add_subplot(1, 4, 1)
     ax.imshow(image)
     ax.set_yticks([])
     ax.set_xticks([])
     ax.axis('off')
     ax.set_title('(a) Input Image', y=-0.14)
 
-    ax = fig.add_subplot(2, 2, 2)
+    ax = fig.add_subplot(1, 4, 2)
     ax.imshow(image)
     for e in range(len(mpii_edges)):
         ax.plot(pose_2d[mpii_edges[e]][:, 0], pose_2d[mpii_edges[e]][:, 1], c='b', lw=3, marker='o')
@@ -85,14 +86,14 @@ def plot2D3DPose(array_id, save_df, poses_2d, poses_3d, img_path, mpii_edges):
     ax.axis('off')
     ax.set_title('(b) 2D Pose Estimation', y=-0.14)
 
-    ax = fig.add_subplot(2, 2, 3, projection='3d')
+    ax = fig.add_subplot(1, 4, 3, projection='3d')
     plot3D(ax, pose_3d, mpii_edges, marker_size=30)
     ax.set_title('(c) 3D Pose Estimation (CVI)', y=-0.23)
     ax.set_yticks([])
     ax.set_xticks([])
     ax.set_zticks([])
     
-    ax = fig.add_subplot(2, 2, 4)
+    ax = fig.add_subplot(1, 4, 4)
     plot2D(ax, pose_3d, mpii_edges)
     ax.set_title('(d) 3D Pose Estimation (CVI) 2D Projection', y=-0.2)
     ax.set_yticks([])
@@ -159,5 +160,58 @@ def cameraInvariantDataset(raw_poses):
         best_pose = cameraInvariantPose(pose_3d)
         cleaned_pose_arr[i] = best_pose.flatten()
     return cleaned_pose_arr
+
+def getFreezeFrame(shots, shot_id):
+    onevone = shots.copy()
+    ### Plot a shooting Situation
+    #onevone['shot_freeze_frame'][shot_id][0]['position']['name']
+    shooter_x = onevone['location'][shot_id][0]
+    shooter_y = onevone['location'][shot_id][1]
+
+    num_players = len(onevone['shot_freeze_frame'][shot_id])
+    is_gk = np.zeros(num_players)
+    is_teammate = np.zeros(num_players)
+    freeze_frame_x = np.zeros(num_players)
+    freeze_frame_y = np.zeros(num_players)
+    for i in range(num_players):
+        freeze_frame_x[i] = onevone['shot_freeze_frame'][shot_id][i]['location'][0]
+        freeze_frame_y[i] = onevone['shot_freeze_frame'][shot_id][i]['location'][1]
+        is_gk[i] = onevone['shot_freeze_frame'][shot_id][i]['position']['name'] == 'Goalkeeper'
+        is_teammate[i] = onevone['shot_freeze_frame'][shot_id][i]['teammate']
+
+    attacking_team_x = freeze_frame_x[is_teammate.astype(bool)]
+    attacking_team_y = freeze_frame_y[is_teammate.astype(bool)]
+    defending_team_x = freeze_frame_x[~ is_teammate.astype(bool)]
+    defending_team_y = freeze_frame_y[~ is_teammate.astype(bool)]
+    gk_x = freeze_frame_x[is_gk.astype(bool)]
+    gk_y = freeze_frame_y[is_gk.astype(bool)]
+    return shooter_x,shooter_y,attacking_team_x,attacking_team_y,defending_team_x,defending_team_y,gk_x,gk_y,is_gk
+
+def distance_to_goal(shooter_x, shooter_y, goal_x = 120, goal_y=40):
+    return np.linalg.norm(np.array([shooter_x,shooter_y])-np.array([goal_x,goal_y]))
+
+def goal_angle(shooter_x, shooter_y, goal_x = 120, goal_y=40):
+    return math.degrees(math.atan(np.abs(goal_y-shooter_y) / np.abs(goal_x - shooter_x)))
+
+def getPhotoID(df):
+    #Extract photo_id
+    photo_id = []
+    for i in range(len(df)):
+        photo_id.append(int(re.findall(r"(\d+).", df['file'][i])[0]))
+    df['photo_id'] = photo_id
+    return df
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
