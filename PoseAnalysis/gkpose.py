@@ -17,6 +17,14 @@ import matplotlib.cm as cm
 import math
 import cv2
 import re
+import json
+from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
+from sklearn.cluster import AgglomerativeClustering
+from sklearn.metrics import silhouette_score
+from sklearn.manifold import LocallyLinearEmbedding
+from sklearn.manifold import TSNE
+from sklearn.decomposition import PCA
 
 mpii_edges = [[0, 1], [1, 2], [2, 6], [6, 3], [3, 4], [4, 5], 
               [10, 11], [11, 12], [12, 8], [8, 13], [13, 14], [14, 15], 
@@ -152,6 +160,22 @@ def cameraInvariantPose(pose_3d):
             max_hip_width = hip_width
     return best_pose
 
+def flipBehindPoses(cvi_arr):
+    #Rotates the poses that are photographed from behind 180 degrees
+    sets_3d_cvi = np.zeros(cvi_arr.shape)
+    for i in range(len(sets_3d_cvi)):
+        #Rotate the photos from behind by 180 degrees
+        pose = pose_to_matrix(cvi_arr[i])
+        if pose[10][0] > pose[15][0]: #if RHx > LHx
+            #print("This is a photo from behind")
+            #Rotate this pose 180 degrees
+            new_pose = rotatePose(pose, 180).flatten()
+        else:
+            #print("This is a photo from in front")
+            new_pose = pose.flatten()
+        sets_3d_cvi[i] = new_pose
+    return sets_3d_cvi
+
 def cameraInvariantDataset(raw_poses):
     #Converts the raw body point dataset to a cleaned camera-invariant one
     cleaned_pose_arr = raw_poses.copy()
@@ -200,6 +224,183 @@ def getPhotoID(df):
         photo_id.append(int(re.findall(r"(\d+).", df['file'][i])[0]))
     df['photo_id'] = photo_id
     return df
+
+def silhouetteInertia(poses):
+    #Silhouette scores and inertia to find optimal number of clusters, k
+    silhouette = []
+    inertia = []
+    for k in range(2, 11):
+        kmeans = KMeans(n_clusters=k)
+        clusters = kmeans.fit_predict(poses)
+        silhouette.append(silhouette_score(poses, clusters))
+        inertia.append(kmeans.inertia_)
+    return (silhouette, inertia)
+
+def plotSilIner(sil, iner, save, k_min=2, k_max=10):
+    fig,ax = plt.subplots(nrows=1, ncols=2, figsize=(10,4))
+    ax[0].plot(range(k_min,k_max+1), sil)
+    ax[0].set_xlabel('Number of Clusters, k')
+    ax[0].set_ylabel('Silhouette Score')
+    ax[1].plot(range(k_min,k_max+1), iner)
+    ax[1].set_xlabel('Number of Clusters, k')
+    ax[1].set_ylabel('Inertia')
+    plt.tight_layout()
+    plt.savefig('viz/' + save + '.png', dpi=500)
+    plt.show()
+
+def getKMeans(poses, k):
+    kmeans = KMeans(n_clusters=k)
+    clusters_kmeans = kmeans.fit_predict(poses)
+    return clusters_kmeans
+
+def getGMM(poses, k):
+    gmm = GaussianMixture(n_components=k, n_init=10)
+    clusters_gmm = gmm.fit_predict(poses)
+    return clusters_gmm
+
+def getHier(poses, k):
+    return AgglomerativeClustering(n_clusters = k, affinity='euclidean', linkage='ward').fit_predict(poses)
+
+def plotManifold(pose_arr, kmeans_labels, gmm_labels, hier_labels, k, save):
+    tsne_raw = TSNE(n_components=2).fit_transform(pose_arr)
+    pca_raw = PCA(n_components=2).fit_transform(pose_arr)
+    lle_raw = LocallyLinearEmbedding(n_components=2, n_neighbors=5).fit_transform(pose_arr)
+    colors_kmeans = cm.nipy_spectral(kmeans_labels.astype(float) / k)
+    colors_gmm = cm.rainbow(gmm_labels.astype(float) / k)
+    colors_hier = cm.coolwarm(hier_labels.astype(float) / k)
+    rows = ['t-SNE', 'PCA', 'LLE']
+    
+    fig, axes = plt.subplots(nrows=3, ncols=3, figsize=(15, 15))
+    axes[0, 0].scatter(tsne_raw[:,0], tsne_raw[:,1], c=colors_kmeans)
+    axes[0, 0].set_title('K-Means', size=16)
+    axes[1, 0].scatter(pca_raw[:,0], pca_raw[:,1], c=colors_kmeans)
+    axes[2, 0].scatter(lle_raw[:,0], lle_raw[:,1], c=colors_kmeans)
+    
+    axes[0, 1].scatter(tsne_raw[:,0], tsne_raw[:,1], c=colors_gmm)
+    axes[0, 1].set_title('Gaussian Mixture Model', size=16)
+    axes[1, 1].scatter(pca_raw[:,0], pca_raw[:,1], c=colors_gmm)
+    axes[2, 1].scatter(lle_raw[:,0], lle_raw[:,1], c=colors_gmm)
+    
+    axes[0, 2].scatter(tsne_raw[:,0], tsne_raw[:,1], c=colors_hier)
+    axes[0, 2].set_title('Hierarchical Clustering', size=16)
+    axes[1, 2].scatter(pca_raw[:,0], pca_raw[:,1], c=colors_hier)
+    axes[2, 2].scatter(lle_raw[:,0], lle_raw[:,1], c=colors_hier)
+    
+    for ax, row in zip(axes[:,0], rows):
+        ax.annotate(row, xy=(0, 0.5), xytext=(-ax.yaxis.labelpad - 4, 0),
+                    xycoords=ax.yaxis.label, textcoords='offset points',
+                    size=16, ha='right', va='center')
+    
+    plt.savefig('viz/' + save + '.png', dpi=500)
+    plt.show()
+
+def clusterExamples(k, n_examples, path, model_clusters, pose_df, pose_arr, mpii_edges, save):
+    ax_array = np.linspace(1, k * 2 * n_examples - (k * 2 - 1), n_examples).astype(int)
+    fig = plt.figure(figsize=(15, 15))
+    for a in ax_array:
+        addition = 0
+        for cluster in range(k):
+            arr_id = np.random.choice(np.where(model_clusters == cluster)[0])
+            photo_id = ImageID(pose_df, arr_id)
+            ax = fig.add_subplot(n_examples, k*2, a + addition)
+            ax.imshow(importImage(path + photo_id))
+            ax.set_xticks([])
+            ax.set_yticks([])
+            addition += 1
+            ax = fig.add_subplot(n_examples, k*2, a+addition)
+            plot2D(ax, pose_to_matrix(pose_arr[arr_id][:-1]), mpii_edges)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_xlabel('')
+            ax.set_ylabel('')
+            if a == 1:
+                ax.set_title('Cluster ' + str(cluster), position=(-0.1, 1), size=16)
+            addition += 1
+
+    plt.tight_layout()
+    plt.savefig('viz/' + save + '.png', dpi=500)
+    plt.show()
+
+
+def ImageID(df, array_id):
+    #Get photo id's of poses
+    return df.loc[array_id, 'file']
+
+def bodyAngle(pose_3d):
+    midpoint = (pose_3d[0][:2] + pose_3d[5][:2])/2
+    midpoint[1] *= -1
+    torso = pose_3d[7][:2] * np.array([1, -1])
+    body_angle_vec = torso-midpoint
+    return math.atan2(body_angle_vec[0], body_angle_vec[1])*180/math.pi
+
+def handHeight(pose_3d):
+    hand_height = np.abs(np.min(-pose_3d[:, 1]) - np.min(-pose_3d[[10, 15]][:, 1]))
+    return hand_height
+
+def bodyHeight(pose_3d):
+    #Body Height
+    height = np.abs(np.max(-pose_3d[:, 1]) - np.min(-pose_3d[:, 1]))
+    return height
+
+def handWidth(pose_3d):
+    return np.linalg.norm(pose_3d[10] - pose_3d[15])
+
+def hipHeight(pose_3d):
+    return np.abs(-np.min(-pose_3d[:, 1]))
+
+def minLowerLegDist(pose_3d):
+    return np.min([np.linalg.norm(pose_3d[1][:2] - pose_3d[0][:2]), np.linalg.norm(pose_3d[4][:2] - pose_3d[5][:2])])
+
+def feetWidth(pose_3d):
+    return np.linalg.norm(pose_3d[0] - pose_3d[5])
+
+def minArmAngle(pose_3d):
+    left_arm = pose_3d[15] - pose_3d[8]
+    right_arm = pose_3d[10] - pose_3d[8]
+    left_angle = math.atan2(np.abs(left_arm[1]), np.abs(left_arm[0]))*180/math.pi
+    right_angle = math.atan2(np.abs(right_arm[1]), np.abs(right_arm[0]))*180/math.pi
+    return np.min([left_angle, right_angle])
+
+def minLowerLegAngle(pose_3d):
+    left_arm = pose_3d[5] - pose_3d[4]
+    right_arm = pose_3d[1] - pose_3d[0]
+    left_angle = math.atan2(np.abs(left_arm[1]), np.abs(left_arm[0]))*180/math.pi
+    right_angle = math.atan2(np.abs(right_arm[1]), np.abs(right_arm[0]))*180/math.pi
+    return np.min([left_angle, right_angle])
+
+def PosesFeatureSpace(clean_poses):
+    #Input: clean_poses - dataset off all of the camera-invariant poses
+    #Returns: dataset of poses in feature space
+    pose_features = np.zeros((len(clean_poses), 9))
+    for i in range(len(clean_poses)):
+        pose_3d = pose_to_matrix(clean_poses[i])
+        feature_array = np.array([bodyHeight(pose_3d), handHeight(pose_3d),
+                                  bodyAngle(pose_3d), handWidth(pose_3d),
+                                  hipHeight(pose_3d), minLowerLegDist(pose_3d),
+                                  feetWidth(pose_3d), minArmAngle(pose_3d),
+                                  minLowerLegAngle(pose_3d)])
+        pose_features[i] = feature_array
+    return pose_features
+
+def importSBjson(file_name, path='data/events/'):
+    with open(path+file_name) as data_file:
+        #print (mypath+'events/'+file)
+        data = json.load(data_file)
+    
+    #get the nested structure into a dataframe 
+    #store the dataframe in a dictionary with the match id as key (remove '.json' from string)
+    df = pd.json_normalize(data, sep = "_").assign(match_id = file_name[:-5])
+    return df
+
+
+
+
+
+
+
+
+
+
 
 
 
